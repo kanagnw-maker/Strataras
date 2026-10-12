@@ -1,0 +1,2 @@
+ALTER TABLE public.products ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS products_category_fav_sort_idx ON public.products (category_id, is_favorite DESC, sort_order);

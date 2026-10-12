@@ -1,0 +1,1 @@
+ALTER TABLE public.products ADD COLUMN stock_quantity integer NOT NULL DEFAULT 999 CHECK (stock_quantity >= 0);
