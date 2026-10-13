@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Send, Volume2, VolumeX, Square, Loader2, Sparkles, RotateCcw, ShoppingBasket } from "lucide-react";
 import { useServerFn } from "@tanstack/react-start";
-import { askMenuAssistant } from "@/server/menu-assistant.functions";
+import { askMenuAssistant } from "@/lib/menu-assistant.functions";
 import { submitOrder } from "@/lib/orders.functions";
 import { useTTS } from "@/hooks/useTTS";
 import { cn } from "@/lib/utils";
