@@ -34,7 +34,7 @@ async function getMenu(lang: string) {
   return lines.join("\n") || "Το μενού είναι κενό αυτή τη στιγμή.";
 }
 
-async function getHours(lang: string) {
+async function getHours() {
   const { data } = await supabaseAdmin.from("restaurant_settings").select("key,value").eq("key", "opening_hours").maybeSingle();
   if (!data?.value) return "Δεν υπάρχουν διαθέσιμες πληροφορίες ωραρίου.";
   return typeof data.value === "string" ? data.value : JSON.stringify(data.value);
@@ -43,37 +43,65 @@ async function getHours(lang: string) {
 export const askMenuAssistantGateway = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => inputSchema.parse(input))
   .handler(async ({ data }) => {
-    const apiKey = process.env.AI_GATEWAY_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return { reply: "", suggested: [], error: "Ο βοηθός δεν είναι διαθέσιμος αυτή τη στιγμή." };
 
     try {
       const lang = data.lang === "en" ? "en" : data.lang === "de" ? "de" : data.lang === "fr" ? "fr" : data.lang === "es" ? "es" : data.lang === "tr" ? "tr" : "el";
-      const [menu, hours] = await Promise.all([getMenu(lang), getHours(lang)]);
+      const [menu, hours] = await Promise.all([getMenu(lang), getHours()]);
 
       const languageName = ({ el: "ελληνικά", en: "English", de: "Deutsch", fr: "français", es: "español", tr: "Türkçe" } as Record<string, string>)[lang];
-      const system = `Είσαι ο Στρατάρας του εστιατορίου Παράταιρον στη Μυτιλήνη. Μιλάς φυσικά, άμεσα, λαϊκά και φιλικά. Απάντα αποκλειστικά στα ${languageName}.\n\nΚΑΝΟΝΕΣ:\n- Χρησιμοποίησε μόνο πιάτα που υπάρχουν στο παρακάτω μενού.\n- Μην εφευρίσκεις τιμές, πιάτα ή υλικά.\n- Για αλλεργίες/διατροφικές προτιμήσεις βασίσου μόνο στα tags του μενού. Αν δεν είσαι βέβαιος, πες να ρωτήσει το προσωπικό.\n- Όταν προτείνεις πιάτα, βάλε την τιμή τους.\n- Για απλές ερωτήσεις απάντα σύντομα και φυσικά.\n- Αν ο πελάτης ζητήσει πρόταση, πρότεινε 3-5 πιάτα και ένα φυσικό upsell.\n- Αν ο πελάτης ζητήσει να παραγγείλει/να βάλεις πιάτα, στο τέλος πρόσθεσε ακριβώς ένα block <CART_SUGGEST>[{"product_id":"UUID","qty":1}]</CART_SUGGEST>, χρησιμοποιώντας μόνο πραγματικά ids από το μενού.\n- Αν δεν ζητά παραγγελία, μην προσθέτεις CART_SUGGEST.\n\nΩΡΑΡΙΟ:\n${hours}\n\nΜΕΝΟΥ:\n${menu}`;
+      const system = `Είσαι ο Στρατάρας του εστιατορίου Παράταιρον στη Μυτιλήνη. Μιλάς φυσικά, άμεσα, λαϊκά και φιλικά. Απάντα αποκλειστικά στα ${languageName}.
 
-      const messages = [
-        { role: "system", content: system },
-        ...data.history.slice(-10),
-        { role: "user", content: data.message },
+ΚΑΝΟΝΕΣ:
+- Χρησιμοποίησε μόνο πιάτα που υπάρχουν στο παρακάτω μενού.
+- Μην εφευρίσκεις τιμές, πιάτα ή υλικά.
+- Για αλλεργίες/διατροφικές προτιμήσεις βασίσου μόνο στα tags του μενού. Αν δεν είσαι βέβαιος, πες να ρωτήσει το προσωπικό.
+- Όταν προτείνεις πιάτα, βάλε την τιμή τους.
+- Για απλές ερωτήσεις απάντα σύντομα και φυσικά.
+- Αν ο πελάτης ζητήσει πρόταση, πρότεινε 3-5 πιάτα και ένα φυσικό upsell.
+- Αν ο πελάτης ζητήσει να παραγγείλει/να βάλεις πιάτα, στο τέλος πρόσθεσε ακριβώς ένα block <CART_SUGGEST>[{"product_id":"UUID","qty":1}]</CART_SUGGEST>, χρησιμοποιώντας μόνο πραγματικά ids από το μενού.
+- Αν δεν ζητά παραγγελία, μην προσθέτεις CART_SUGGEST.
+
+ΩΡΑΡΙΟ:
+${hours}
+
+ΜΕΝΟΥ:
+${menu}`;
+
+      const contents = [
+        ...data.history.slice(-10).map((item) => ({
+          role: item.role === "assistant" ? "model" : "user",
+          parts: [{ text: item.content }],
+        })),
+        { role: "user", parts: [{ text: data.message }] },
       ];
 
-      const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+      const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent", {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "google/gemini-3-flash", messages, max_tokens: 700 }),
+        headers: {
+          "x-goog-api-key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: system }] },
+          contents,
+          generationConfig: { maxOutputTokens: 700 },
+        }),
       });
 
       if (res.status === 429) return { reply: "", suggested: [], error: "Πολλά αιτήματα — δοκίμασε ξανά σε λίγο." };
-      if (res.status === 402) return { reply: "", suggested: [], error: "Ο βοηθός εξάντλησε τα διαθέσιμα credits." };
+      if (res.status === 403) {
+        console.error("Gemini API error", res.status, await res.text());
+        return { reply: "", suggested: [], error: "Το Gemini API δεν επέτρεψε το αίτημα. Έλεγξε το API key και το project." };
+      }
       if (!res.ok) {
-        console.error("AI Gateway error", res.status, await res.text());
+        console.error("Gemini API error", res.status, await res.text());
         return { reply: "", suggested: [], error: "Πρόβλημα με τον βοηθό. Δοκίμασε ξανά." };
       }
 
       const json = await res.json();
-      const raw = String(json?.choices?.[0]?.message?.content ?? "");
+      const raw = String(json?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part?.text ?? "").join("") ?? "");
       const match = raw.match(/<CART_SUGGEST>([\s\S]*?)<\/CART_SUGGEST>/i);
       let suggested: Array<{ product_id: string; quantity: number; name: string; price: number }> = [];
       let reply = raw.replace(/<CART_SUGGEST>[\s\S]*?<\/CART_SUGGEST>/i, "").trim();
@@ -96,7 +124,7 @@ export const askMenuAssistantGateway = createServerFn({ method: "POST" })
 
       return { reply, suggested, error: null as string | null, detectedLang: lang };
     } catch (error) {
-      console.error("askMenuAssistantGateway error", error);
+      console.error("askMenuAssistantGemini error", error);
       return { reply: "", suggested: [], error: "Κάτι πήγε στραβά. Δοκίμασε ξανά." };
     }
   });
