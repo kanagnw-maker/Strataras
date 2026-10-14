@@ -1,0 +1,102 @@
+import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
+
+const inputSchema = z.object({
+  message: z.string().min(1).max(1000),
+  history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(4000) })).max(20).optional().default([]),
+  lang: z.string().min(2).max(5).optional().default("el"),
+});
+
+function localized(value: unknown, lang: string) {
+  if (!value || typeof value !== "object") return "";
+  const v = value as Record<string, string | undefined>;
+  return v[lang] || v.el || v.en || Object.values(v).find(Boolean) || "";
+}
+
+async function getMenu(lang: string) {
+  const [{ data: cats }, { data: products }] = await Promise.all([
+    supabaseAdmin.from("categories").select("id,name,sort_order,active").eq("active", true).order("sort_order"),
+    supabaseAdmin.from("products").select("id,category_id,name,description,price,tags,active,stock_quantity").eq("active", true).gt("stock_quantity", 0).order("sort_order"),
+  ]);
+
+  const lines: string[] = [];
+  for (const cat of cats ?? []) {
+    const items = (products ?? []).filter((p) => p.category_id === cat.id);
+    if (!items.length) continue;
+    lines.push(`## ${localized(cat.name, lang)}`);
+    for (const p of items) {
+      const tags = Array.isArray(p.tags) && p.tags.length ? ` [${p.tags.join(", ")}]` : "";
+      const desc = localized(p.description, lang);
+      lines.push(`- id:${p.id} | ${localized(p.name, lang)} | ${p.price != null ? `${Number(p.price).toFixed(2)}€` : "—"}${tags}${desc ? ` | ${desc}` : ""}`);
+    }
+  }
+  return lines.join("\n") || "Το μενού είναι κενό αυτή τη στιγμή.";
+}
+
+async function getHours(lang: string) {
+  const { data } = await supabaseAdmin.from("restaurant_settings").select("key,value").eq("key", "opening_hours").maybeSingle();
+  if (!data?.value) return "Δεν υπάρχουν διαθέσιμες πληροφορίες ωραρίου.";
+  return typeof data.value === "string" ? data.value : JSON.stringify(data.value);
+}
+
+export const askMenuAssistantGateway = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => inputSchema.parse(input))
+  .handler(async ({ data }) => {
+    const apiKey = process.env.AI_GATEWAY_API_KEY;
+    if (!apiKey) return { reply: "", suggested: [], error: "Ο βοηθός δεν είναι διαθέσιμος αυτή τη στιγμή." };
+
+    try {
+      const lang = data.lang === "en" ? "en" : data.lang === "de" ? "de" : data.lang === "fr" ? "fr" : data.lang === "es" ? "es" : data.lang === "tr" ? "tr" : "el";
+      const [menu, hours] = await Promise.all([getMenu(lang), getHours(lang)]);
+
+      const languageName = ({ el: "ελληνικά", en: "English", de: "Deutsch", fr: "français", es: "español", tr: "Türkçe" } as Record<string, string>)[lang];
+      const system = `Είσαι ο Στρατάρας του εστιατορίου Παράταιρον στη Μυτιλήνη. Μιλάς φυσικά, άμεσα, λαϊκά και φιλικά. Απάντα αποκλειστικά στα ${languageName}.\n\nΚΑΝΟΝΕΣ:\n- Χρησιμοποίησε μόνο πιάτα που υπάρχουν στο παρακάτω μενού.\n- Μην εφευρίσκεις τιμές, πιάτα ή υλικά.\n- Για αλλεργίες/διατροφικές προτιμήσεις βασίσου μόνο στα tags του μενού. Αν δεν είσαι βέβαιος, πες να ρωτήσει το προσωπικό.\n- Όταν προτείνεις πιάτα, βάλε την τιμή τους.\n- Για απλές ερωτήσεις απάντα σύντομα και φυσικά.\n- Αν ο πελάτης ζητήσει πρόταση, πρότεινε 3-5 πιάτα και ένα φυσικό upsell.\n- Αν ο πελάτης ζητήσει να παραγγείλει/να βάλεις πιάτα, στο τέλος πρόσθεσε ακριβώς ένα block <CART_SUGGEST>[{"product_id":"UUID","qty":1}]</CART_SUGGEST>, χρησιμοποιώντας μόνο πραγματικά ids από το μενού.\n- Αν δεν ζητά παραγγελία, μην προσθέτεις CART_SUGGEST.\n\nΩΡΑΡΙΟ:\n${hours}\n\nΜΕΝΟΥ:\n${menu}`;
+
+      const messages = [
+        { role: "system", content: system },
+        ...data.history.slice(-10),
+        { role: "user", content: data.message },
+      ];
+
+      const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "google/gemini-3-flash", messages, max_tokens: 700 }),
+      });
+
+      if (res.status === 429) return { reply: "", suggested: [], error: "Πολλά αιτήματα — δοκίμασε ξανά σε λίγο." };
+      if (res.status === 402) return { reply: "", suggested: [], error: "Ο βοηθός εξάντλησε τα διαθέσιμα credits." };
+      if (!res.ok) {
+        console.error("AI Gateway error", res.status, await res.text());
+        return { reply: "", suggested: [], error: "Πρόβλημα με τον βοηθό. Δοκίμασε ξανά." };
+      }
+
+      const json = await res.json();
+      const raw = String(json?.choices?.[0]?.message?.content ?? "");
+      const match = raw.match(/<CART_SUGGEST>([\s\S]*?)<\/CART_SUGGEST>/i);
+      let suggested: Array<{ product_id: string; quantity: number; name: string; price: number }> = [];
+      let reply = raw.replace(/<CART_SUGGEST>[\s\S]*?<\/CART_SUGGEST>/i, "").trim();
+
+      if (match) {
+        try {
+          const requested = JSON.parse(match[1]);
+          const ids = Array.isArray(requested) ? requested.map((x) => x?.product_id).filter((x): x is string => typeof x === "string") : [];
+          if (ids.length) {
+            const { data: products } = await supabaseAdmin.from("products").select("id,name,price,active,stock_quantity").in("id", ids);
+            const map = new Map((products ?? []).map((p) => [p.id, p]));
+            suggested = (Array.isArray(requested) ? requested : []).flatMap((x) => {
+              const p = map.get(x?.product_id);
+              if (!p || !p.active || p.price == null || (p.stock_quantity ?? 0) <= 0) return [];
+              return [{ product_id: p.id, quantity: Math.min(20, Math.max(1, Math.floor(Number(x.qty ?? 1)))), name: localized(p.name, lang), price: Number(p.price) }];
+            });
+          }
+        } catch { /* ignore malformed suggestion block */ }
+      }
+
+      return { reply, suggested, error: null as string | null, detectedLang: lang };
+    } catch (error) {
+      console.error("askMenuAssistantGateway error", error);
+      return { reply: "", suggested: [], error: "Κάτι πήγε στραβά. Δοκίμασε ξανά." };
+    }
+  });
