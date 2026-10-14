@@ -84,7 +84,7 @@ ${menu}`;
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: system }] },
+          system_instruction: { parts: [{ text: system }] },
           contents,
           generationConfig: { maxOutputTokens: 700 },
         }),
